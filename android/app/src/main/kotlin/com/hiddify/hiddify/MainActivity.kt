@@ -58,20 +58,25 @@ class MainActivity : FlutterFragmentActivity(), ServiceConnection.Callback {
     }
 
     fun startService() {
+        Log.d(TAG, "startService() called")
+        
         // 首先检查通知权限（Android 13+ 需要）
         if (!ServiceNotification.checkPermission()) {
             Log.d(TAG, "Notification permission not granted, requesting...")
             grantNotificationPermission()
             return
         }
+        Log.d(TAG, "Notification permission check passed")
         
         lifecycleScope.launch(Dispatchers.IO) {
             if (Settings.rebuildServiceMode()) {
+                Log.d(TAG, "Service mode changed, reconnecting...")
                 reconnect()
             }
             
             // 如果是 VPN 模式，需要检查 VPN 权限
             if (Settings.serviceMode == ServiceMode.VPN) {
+                Log.d(TAG, "VPN mode detected, checking VPN permission...")
                 val needsPermission = prepare()
                 if (needsPermission) {
                     // prepare() 返回 true 表示需要用户授权，已弹出系统对话框
@@ -80,6 +85,9 @@ class MainActivity : FlutterFragmentActivity(), ServiceConnection.Callback {
                     return@launch
                 }
                 // prepare() 返回 false 表示已有权限，可以继续
+                Log.d(TAG, "VPN permission already granted")
+            } else {
+                Log.d(TAG, "Non-VPN mode: ${Settings.serviceMode}")
             }
 
             // 所有权限检查通过，启动服务
@@ -88,10 +96,16 @@ class MainActivity : FlutterFragmentActivity(), ServiceConnection.Callback {
             withContext(Dispatchers.Main) {
                 try {
                     ContextCompat.startForegroundService(Application.application, intent)
-                    Log.d(TAG, "VPN service start intent sent")
+                    Log.d(TAG, "VPN service start intent sent successfully")
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "SecurityException starting VPN service: ${e.message}", e)
+                    onServiceAlert(Alert.StartService, "Security error: ${e.message}. Please check VPN permission.")
+                } catch (e: IllegalStateException) {
+                    Log.e(TAG, "IllegalStateException starting VPN service: ${e.message}", e)
+                    onServiceAlert(Alert.StartService, "Service error: ${e.message}")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to start VPN service: ${e.message}", e)
-                    onServiceAlert(Alert.StartService, e.message)
+                    onServiceAlert(Alert.StartService, "Failed to start service: ${e.message}")
                 }
             }
         }
@@ -103,17 +117,28 @@ class MainActivity : FlutterFragmentActivity(), ServiceConnection.Callback {
             if (intent != null) {
                 // 需要用户授权，弹出系统对话框（会要求输入密码/指纹）
                 Log.d(TAG, "VPN permission required, starting permission request activity")
-                startActivityForResult(intent, VPN_PERMISSION_REQUEST_CODE)
+                try {
+                    startActivityForResult(intent, VPN_PERMISSION_REQUEST_CODE)
+                    Log.d(TAG, "VPN permission request activity started")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to start VPN permission request activity: ${e.message}", e)
+                    onServiceAlert(Alert.RequestVPNPermission, "Cannot open VPN permission dialog: ${e.message}")
+                }
                 true  // 返回 true 表示需要权限，会阻止服务启动，等待用户授权
             } else {
                 // 已有权限，可以继续
-                Log.d(TAG, "VPN permission already granted")
+                Log.d(TAG, "VPN permission already granted, can proceed")
                 false
             }
+        } catch (e: SecurityException) {
+            // 如果 prepare() 抛出安全异常，说明无法请求权限
+            Log.e(TAG, "SecurityException preparing VPN service: ${e.message}", e)
+            onServiceAlert(Alert.RequestVPNPermission, "Security error: ${e.message}")
+            true  // 返回 true 阻止服务启动
         } catch (e: Exception) {
-            // 如果 prepare() 抛出异常，说明无法请求权限，应该阻止服务启动
+            // 如果 prepare() 抛出其他异常，说明无法请求权限，应该阻止服务启动
             Log.e(TAG, "Failed to prepare VPN service: ${e.message}", e)
-            onServiceAlert(Alert.RequestVPNPermission, e.message)
+            onServiceAlert(Alert.RequestVPNPermission, "Failed to prepare VPN: ${e.message}")
             true  // 返回 true 阻止服务启动，因为无法确定权限状态
         }
     }
@@ -163,8 +188,13 @@ class MainActivity : FlutterFragmentActivity(), ServiceConnection.Callback {
     ) {
         if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                Log.d(TAG, "Notification permission granted, continuing with service start")
+                // 通知权限已授予，继续启动服务流程
                 startService()
-            } else onServiceAlert(Alert.RequestNotificationPermission, null)
+            } else {
+                Log.w(TAG, "Notification permission denied")
+                onServiceAlert(Alert.RequestNotificationPermission, null)
+            }
         }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
@@ -175,6 +205,7 @@ class MainActivity : FlutterFragmentActivity(), ServiceConnection.Callback {
             if (resultCode == RESULT_OK) {
                 // 用户已授权 VPN 权限，可以启动服务
                 Log.d(TAG, "VPN permission granted by user, starting service")
+                // 重新检查所有权限并启动服务
                 startService()
             } else {
                 // 用户拒绝或取消授权
@@ -182,11 +213,13 @@ class MainActivity : FlutterFragmentActivity(), ServiceConnection.Callback {
                 onServiceAlert(Alert.RequestVPNPermission, null)
             }
         } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
+            // 虽然通知权限通常通过 onRequestPermissionsResult 处理，
+            // 但保留此逻辑以兼容某些特殊情况
             if (resultCode == RESULT_OK) {
-                Log.d(TAG, "Notification permission granted, starting service")
+                Log.d(TAG, "Notification permission granted via activity result, starting service")
                 startService()
             } else {
-                Log.w(TAG, "Notification permission denied (resultCode: $resultCode)")
+                Log.w(TAG, "Notification permission denied via activity result (resultCode: $resultCode)")
                 onServiceAlert(Alert.RequestNotificationPermission, null)
             }
         }
