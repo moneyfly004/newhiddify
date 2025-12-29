@@ -441,12 +441,25 @@ class BoxService(
                         
                         logToBoth("I", TAG, "开始过滤 outbounds，原始数量: ${outbounds.length()}")
                         
+                        // 先收集所有 outbound 的 tag，用于后续验证路由引用
+                        val allOutboundTags = mutableSetOf<String>()
+                        
                         for (i in 0 until outbounds.length()) {
                             val outbound = outbounds.getJSONObject(i)
-                            val server = outbound.optString("server", "")
-                            val port = outbound.optInt("port", -1)
                             val tag = outbound.optString("tag", "unknown")
                             val type = outbound.optString("type", "unknown")
+                            
+                            // selector 和 urltest 类型的 outbound 没有 server 字段，必须保留
+                            if (type == "selector" || type == "urltest" || type == "block" || type == "direct") {
+                                validOutbounds.put(outbound)
+                                allOutboundTags.add(tag)
+                                logToBoth("I", TAG, "保留路由组节点: tag=$tag, type=$type")
+                                continue
+                            }
+                            
+                            // 对于其他类型的 outbound，检查 server 字段
+                            val server = outbound.optString("server", "")
+                            val port = outbound.optInt("port", -1)
                             
                             // 过滤掉 127.0.0.1 或 localhost 的节点
                             if (server == "127.0.0.1" || server == "localhost" || 
@@ -457,9 +470,10 @@ class BoxService(
                             }
                             
                             validOutbounds.put(outbound)
+                            allOutboundTags.add(tag)
                         }
                         
-                        if (filteredCount > 0) {
+                        if (filteredCount > 0 || validOutbounds.length() != outbounds.length()) {
                             logToBoth("I", TAG, "✅ 已过滤 $filteredCount 个无效节点，剩余 ${validOutbounds.length()} 个有效节点")
                             jsonObj.put("outbounds", validOutbounds)
                             
@@ -469,6 +483,261 @@ class BoxService(
                                 logToBoth("E", TAG, "订阅配置中只包含无效节点（127.0.0.1），无法连接")
                                 logToBoth("E", TAG, "请检查订阅是否包含有效的代理服务器节点")
                                 throw IllegalStateException("过滤后没有有效的 outbound 节点，订阅配置无效")
+                            }
+                            
+                            // 确保有 direct 和 block 类型的 outbound（如果配置需要但不存在，需要创建）
+                            var hasDirect = false
+                            var hasBlock = false
+                            for (i in 0 until validOutbounds.length()) {
+                                val outbound = validOutbounds.getJSONObject(i)
+                                val type = outbound.optString("type", "")
+                                val tag = outbound.optString("tag", "")
+                                if (type == "direct" || tag == "direct") hasDirect = true
+                                if (type == "block" || tag == "block") hasBlock = true
+                            }
+                            
+                            // 修复 selector 和 urltest 类型的 outbound 内部的 outbounds 引用
+                            for (i in 0 until validOutbounds.length()) {
+                                val outbound = validOutbounds.getJSONObject(i)
+                                val type = outbound.optString("type", "")
+                                
+                                if (type == "selector" || type == "urltest") {
+                                    val tag = outbound.optString("tag", "unknown")
+                                    
+                                    // 检查并修复 outbounds 数组（selector/urltest 引用的节点列表）
+                                    if (outbound.has("outbounds")) {
+                                        val referencedOutbounds = outbound.getJSONArray("outbounds")
+                                        val validReferencedOutbounds = org.json.JSONArray()
+                                        var removedCount = 0
+                                        
+                                        for (j in 0 until referencedOutbounds.length()) {
+                                            val referencedTag = referencedOutbounds.getString(j)
+                                            if (allOutboundTags.contains(referencedTag)) {
+                                                validReferencedOutbounds.put(referencedTag)
+                                            } else {
+                                                removedCount++
+                                                logToBoth("W", TAG, "⚠️ 从 $tag 中移除无效引用: $referencedTag")
+                                            }
+                                        }
+                                        
+                                        if (removedCount > 0) {
+                                            if (validReferencedOutbounds.length() > 0) {
+                                                outbound.put("outbounds", validReferencedOutbounds)
+                                                logToBoth("I", TAG, "✅ 已修复 $tag 的引用，移除了 $removedCount 个无效引用，剩余 ${validReferencedOutbounds.length()} 个")
+                                            } else {
+                                                logToBoth("E", TAG, "❌ $tag 的所有引用都被移除了，该路由组无效")
+                                                // 保留但标记为可能有问题，让 Sing-box 处理
+                                            }
+                                        }
+                                    }
+                                    
+                                    // 检查并修复 selected 字段（selector 类型可能使用）
+                                    if (outbound.has("selected")) {
+                                        val selected = outbound.optString("selected", "")
+                                        if (selected.isNotEmpty() && !allOutboundTags.contains(selected)) {
+                                            logToBoth("W", TAG, "⚠️ $tag 的 selected 字段指向不存在的节点 '$selected'，将清空")
+                                            outbound.put("selected", "")
+                                        }
+                                    }
+                                }
+                                
+                                // 检查并修复其他 outbound 中的 dialerProxy 引用（某些 outbound 可能通过代理连接）
+                                if (outbound.has("dialer_proxy") || outbound.has("dialerProxy")) {
+                                    val dialerProxyKey = if (outbound.has("dialer_proxy")) "dialer_proxy" else "dialerProxy"
+                                    val dialerProxy = outbound.optString(dialerProxyKey, "")
+                                    if (dialerProxy.isNotEmpty() && !allOutboundTags.contains(dialerProxy)) {
+                                        logToBoth("W", TAG, "⚠️ outbound '${outbound.optString("tag", "unknown")}' 的 dialerProxy '$dialerProxy' 不存在，将移除")
+                                        outbound.remove(dialerProxyKey)
+                                    }
+                                }
+                                
+                                // 检查 streamSettings.sockopt.dialerProxy（嵌套结构）
+                                if (outbound.has("stream_settings") || outbound.has("streamSettings")) {
+                                    val streamSettingsKey = if (outbound.has("stream_settings")) "stream_settings" else "streamSettings"
+                                    val streamSettings = outbound.getJSONObject(streamSettingsKey)
+                                    if (streamSettings.has("sockopt") || streamSettings.has("sock_opt")) {
+                                        val sockoptKey = if (streamSettings.has("sockopt")) "sockopt" else "sock_opt"
+                                        val sockopt = streamSettings.getJSONObject(sockoptKey)
+                                        if (sockopt.has("dialer_proxy") || sockopt.has("dialerProxy")) {
+                                            val dialerProxyKey = if (sockopt.has("dialer_proxy")) "dialer_proxy" else "dialerProxy"
+                                            val dialerProxy = sockopt.optString(dialerProxyKey, "")
+                                            if (dialerProxy.isNotEmpty() && !allOutboundTags.contains(dialerProxy)) {
+                                                logToBoth("W", TAG, "⚠️ outbound '${outbound.optString("tag", "unknown")}' 的 streamSettings.sockopt.dialerProxy '$dialerProxy' 不存在，将移除")
+                                                sockopt.remove(dialerProxyKey)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // 检查并修复路由配置中的规则和 final 引用
+                            if (jsonObj.has("route")) {
+                                val route = jsonObj.getJSONObject("route")
+                                
+                                // 修复路由规则（route.rules）中的 outbound 引用
+                                if (route.has("rules")) {
+                                    val rules = route.getJSONArray("rules")
+                                    val validRules = org.json.JSONArray()
+                                    var removedRuleCount = 0
+                                    var fixedRuleCount = 0
+                                    
+                                    // 查找可用的 direct 或 bypass outbound，用于替换缺失的 DNS outbound
+                                    var directOutboundTag: String? = null
+                                    for (i in 0 until validOutbounds.length()) {
+                                        val outbound = validOutbounds.getJSONObject(i)
+                                        val type = outbound.optString("type", "")
+                                        val tag = outbound.optString("tag", "")
+                                        if (type == "direct" || tag == "direct" || tag == "bypass") {
+                                            directOutboundTag = tag
+                                            break
+                                        }
+                                    }
+                                    
+                                    for (i in 0 until rules.length()) {
+                                        val rule = rules.getJSONObject(i)
+                                        var isValidRule = true
+                                        var needsFix = false
+                                        var fixTag: String? = null
+                                        
+                                        // 检查 outboundTag 字段
+                                        if (rule.has("outboundTag")) {
+                                            val outboundTag = rule.optString("outboundTag", "")
+                                            if (outboundTag.isNotEmpty() && !allOutboundTags.contains(outboundTag)) {
+                                                // 如果是 DNS 相关的 outbound（如 dns-out），尝试使用 direct 替换
+                                                if ((outboundTag.contains("dns") || outboundTag == "dns-out") && directOutboundTag != null) {
+                                                    logToBoth("W", TAG, "⚠️ 路由规则[$i] 引用的 DNS outbound '$outboundTag' 不存在，将替换为: $directOutboundTag")
+                                                    rule.put("outboundTag", directOutboundTag)
+                                                    needsFix = true
+                                                    fixTag = directOutboundTag
+                                                } else {
+                                                    logToBoth("W", TAG, "⚠️ 路由规则[$i] 引用的 outbound '$outboundTag' 不存在，将移除该规则")
+                                                    isValidRule = false
+                                                    removedRuleCount++
+                                                }
+                                            }
+                                        }
+                                        
+                                        // 检查 outbound 字段（某些配置可能使用这个字段）
+                                        if (rule.has("outbound")) {
+                                            val outbound = rule.optString("outbound", "")
+                                            if (outbound.isNotEmpty() && !allOutboundTags.contains(outbound)) {
+                                                // 如果是 DNS 相关的 outbound，尝试使用 direct 替换
+                                                if ((outbound.contains("dns") || outbound == "dns-out") && directOutboundTag != null) {
+                                                    logToBoth("W", TAG, "⚠️ 路由规则[$i] 引用的 DNS outbound '$outbound' 不存在，将替换为: $directOutboundTag")
+                                                    rule.put("outbound", directOutboundTag)
+                                                    needsFix = true
+                                                    fixTag = directOutboundTag
+                                                } else {
+                                                    logToBoth("W", TAG, "⚠️ 路由规则[$i] 引用的 outbound '$outbound' 不存在，将移除该规则")
+                                                    isValidRule = false
+                                                    removedRuleCount++
+                                                }
+                                            }
+                                        }
+                                        
+                                        if (isValidRule) {
+                                            validRules.put(rule)
+                                            if (needsFix && fixTag != null) {
+                                                fixedRuleCount++
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (removedRuleCount > 0 || fixedRuleCount > 0) {
+                                        route.put("rules", validRules)
+                                        if (fixedRuleCount > 0) {
+                                            logToBoth("I", TAG, "✅ 已修复路由规则，修复了 $fixedRuleCount 个规则，移除了 $removedRuleCount 个无效规则，剩余 ${validRules.length()} 个有效规则")
+                                        } else {
+                                            logToBoth("I", TAG, "✅ 已修复路由规则，移除了 $removedRuleCount 个无效规则，剩余 ${validRules.length()} 个有效规则")
+                                        }
+                                    } else {
+                                        logToBoth("I", TAG, "✅ 所有路由规则引用的 outbound 都存在")
+                                    }
+                                }
+                                
+                                // 修复 final 引用
+                                if (route.has("final")) {
+                                    val finalTag = route.optString("final", "")
+                                    if (finalTag.isNotEmpty() && !allOutboundTags.contains(finalTag)) {
+                                        logToBoth("W", TAG, "⚠️ 路由 final 指向的 outbound '$finalTag' 不存在，尝试修复")
+                                        
+                                        // 尝试找到 selector 或 urltest 类型的 outbound 作为默认路由
+                                        var defaultTag: String? = null
+                                        for (i in 0 until validOutbounds.length()) {
+                                            val outbound = validOutbounds.getJSONObject(i)
+                                            val type = outbound.optString("type", "")
+                                            if (type == "selector" || type == "urltest") {
+                                                defaultTag = outbound.optString("tag", "")
+                                                break
+                                            }
+                                        }
+                                        
+                                        if (defaultTag != null) {
+                                            route.put("final", defaultTag)
+                                            logToBoth("I", TAG, "✅ 已将路由 final 修复为: $defaultTag")
+                                        } else {
+                                            // 如果找不到 selector/urltest，使用第一个有效的 outbound
+                                            if (validOutbounds.length() > 0) {
+                                                val firstOutbound = validOutbounds.getJSONObject(0)
+                                                defaultTag = firstOutbound.optString("tag", "")
+                                                if (defaultTag.isNotEmpty()) {
+                                                    route.put("final", defaultTag)
+                                                    logToBoth("I", TAG, "✅ 已将路由 final 修复为第一个有效节点: $defaultTag")
+                                                }
+                                            }
+                                        }
+                                        
+                                        if (defaultTag == null) {
+                                            logToBoth("E", TAG, "❌ 无法找到可用的默认路由，配置无效")
+                                        }
+                                    } else if (finalTag.isNotEmpty()) {
+                                        logToBoth("I", TAG, "✅ 路由 final 指向的 outbound '$finalTag' 存在")
+                                    }
+                                }
+                            }
+                            
+                            // 检查并修复 inbound 配置中可能引用的 outbound（某些 inbound 可能有 detour 字段）
+                            if (jsonObj.has("inbounds")) {
+                                val inbounds = jsonObj.getJSONArray("inbounds")
+                                var fixedInboundCount = 0
+                                
+                                for (i in 0 until inbounds.length()) {
+                                    val inbound = inbounds.getJSONObject(i)
+                                    val inboundTag = inbound.optString("tag", "unknown")
+                                    
+                                    // 检查 detour 字段
+                                    if (inbound.has("detour")) {
+                                        val detour = inbound.optString("detour", "")
+                                        if (detour.isNotEmpty() && !allOutboundTags.contains(detour)) {
+                                            logToBoth("W", TAG, "⚠️ inbound '$inboundTag' 的 detour '$detour' 不存在，将移除")
+                                            inbound.remove("detour")
+                                            fixedInboundCount++
+                                        }
+                                    }
+                                }
+                                
+                                if (fixedInboundCount > 0) {
+                                    logToBoth("I", TAG, "✅ 已修复 $fixedInboundCount 个 inbound 的 detour 引用")
+                                }
+                            }
+                            
+                            // 最终验证：确保至少有一个可用的代理节点（非 direct/block/bypass）
+                            var hasProxyNode = false
+                            for (i in 0 until validOutbounds.length()) {
+                                val outbound = validOutbounds.getJSONObject(i)
+                                val type = outbound.optString("type", "")
+                                if (type != "direct" && type != "block" && type != "bypass" && 
+                                    type != "selector" && type != "urltest" && type != "dns") {
+                                    hasProxyNode = true
+                                    break
+                                }
+                            }
+                            
+                            if (!hasProxyNode) {
+                                logToBoth("W", TAG, "⚠️ 配置中没有可用的代理节点，只有路由组或系统节点")
+                                // 不抛出异常，因为可能只有路由组节点，让 Sing-box 处理
+                            } else {
+                                logToBoth("I", TAG, "✅ 配置中包含可用的代理节点")
                             }
                             
                             jsonObj.toString()
