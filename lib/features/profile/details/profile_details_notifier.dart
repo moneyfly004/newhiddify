@@ -87,9 +87,6 @@ class ProfileDetailsNotifier extends _$ProfileDetailsNotifier with AppLogger {
   }) {
     if (state case AsyncData(:final value)) {
       final configContentChanged = value.configContentChanged || value.configContent != configContent;
-      // if (!configContentChanged) {
-      //   return;
-      // }
       state = AsyncData(
         value.copyWith(
           profile: value.profile.map(

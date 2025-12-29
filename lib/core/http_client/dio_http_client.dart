@@ -91,12 +91,15 @@ class DioHttpClient with InfraLogger {
 
   void setAccessToken(String? token) {
     _accessToken = token;
+    loggy.debug("设置AccessToken: ${token != null ? '已设置 (${token.length > 20 ? token.substring(0, 20) + '...' : token})' : '已清除'}");
     // 更新所有Dio实例的headers
     for (final dio in _dio.values) {
       if (token != null) {
         dio.options.headers['Authorization'] = 'Bearer $token';
+        loggy.debug("已为Dio实例设置Authorization header");
       } else {
         dio.options.headers.remove('Authorization');
+        loggy.debug("已清除Dio实例的Authorization header");
       }
     }
   }
@@ -118,6 +121,7 @@ class DioHttpClient with InfraLogger {
     final dio = _dio[mode]!;
 
     loggy.debug("GET请求: url=$url, mode=$mode, proxyOnly=$proxyOnly");
+    loggy.debug("Authorization header: ${dio.options.headers['Authorization'] ?? '未设置'}");
 
     return dio.get<T>(
       url,
@@ -140,6 +144,7 @@ class DioHttpClient with InfraLogger {
     final dio = _dio[mode]!;
 
     loggy.debug("POST请求: url=$url, mode=$mode, proxyOnly=$proxyOnly");
+    loggy.debug("Authorization header: ${dio.options.headers['Authorization'] ?? '未设置'}");
 
     return dio.post<T>(
       url,

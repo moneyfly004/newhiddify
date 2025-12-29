@@ -4,7 +4,7 @@ import 'package:gap/gap.dart';
 import 'package:hiddify/core/localization/translations.dart';
 import 'package:hiddify/core/model/failures.dart';
 import 'package:hiddify/core/notification/in_app_notification_controller.dart';
-import 'package:hiddify/core/router/router.dart';
+import 'package:hiddify/core/router/routes.dart';
 import 'package:hiddify/features/profile/model/profile_sort_enum.dart';
 import 'package:hiddify/features/profile/notifier/profiles_update_notifier.dart';
 import 'package:hiddify/features/profile/overview/profiles_overview_notifier.dart';
@@ -76,8 +76,6 @@ class ProfilesOverviewModal extends HookConsumerWidget {
                   alignment: WrapAlignment.center,
                   spacing: 8,
                   children: [
-                    // 删除订阅相关操作按钮，因为订阅是自动从后台返回的，默认只有一个，不需要编辑
-                    // 只保留"新的配置文件"按钮
                     FilledButton.icon(
                       onPressed: () {
                         const AddProfileRoute().push(context);

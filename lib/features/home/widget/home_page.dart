@@ -12,7 +12,6 @@ import 'package:hiddify/features/config_option/data/config_option_repository.dar
 import 'package:hiddify/features/subscription/notifier/auto_subscription_notifier.dart';
 import 'package:hiddify/features/home/widget/connection_button.dart';
 import 'package:hiddify/features/home/widget/empty_profiles_home_body.dart';
-import 'package:hiddify/features/profile/model/profile_entity.dart';
 import 'package:hiddify/features/profile/notifier/active_profile_notifier.dart';
 import 'package:hiddify/features/profile/widget/profile_tile.dart';
 import 'package:hiddify/features/proxy/active/active_proxy_delay_indicator.dart';
@@ -60,7 +59,6 @@ class HomePage extends HookConsumerWidget {
                   IconButton(
                     onPressed: () async {
                       // 手动刷新订阅
-                      await ref.read(autoSubscriptionNotifierProvider.notifier).refreshSubscription();
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
@@ -68,6 +66,28 @@ class HomePage extends HookConsumerWidget {
                             duration: Duration(seconds: 2),
                           ),
                         );
+                      }
+                      try {
+                        await ref.read(autoSubscriptionNotifierProvider.notifier).refreshSubscription();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('订阅刷新成功'),
+                              backgroundColor: Colors.green,
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('订阅刷新失败: $e'),
+                              backgroundColor: Colors.red,
+                              duration: const Duration(seconds: 3),
+                            ),
+                          );
+                        }
                       }
                     },
                     icon: const Icon(FluentIcons.arrow_sync_24_regular),
@@ -79,59 +99,6 @@ class HomePage extends HookConsumerWidget {
                 AsyncData(value: final profile?) => MultiSliver(
                     children: [
                       ProfileTile(profile: profile, isMain: true),
-                      // 检查订阅是否过期，显示到期提示
-                      if (profile case RemoteProfileEntity(:final subInfo?) when subInfo.isExpired)
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            child: Card(
-                              color: Theme.of(context).colorScheme.errorContainer,
-                              child: Padding(
-                                padding: const EdgeInsets.all(16),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      FluentIcons.warning_24_filled,
-                                      color: Theme.of(context).colorScheme.onErrorContainer,
-                                    ),
-                                    const Gap(12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            '订阅已过期',
-                                            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                                  color: Theme.of(context).colorScheme.onErrorContainer,
-                                                  fontWeight: FontWeight.bold,
-                                                ),
-                                          ),
-                                          const Gap(4),
-                                          Text(
-                                            '您的订阅已过期，请续费后继续使用',
-                                            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                                  color: Theme.of(context).colorScheme.onErrorContainer,
-                                                ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    FilledButton(
-                                      onPressed: () {
-                                        const ShopRoute().go(context);
-                                      },
-                                      style: FilledButton.styleFrom(
-                                        backgroundColor: Theme.of(context).colorScheme.onErrorContainer,
-                                        foregroundColor: Theme.of(context).colorScheme.errorContainer,
-                                      ),
-                                      child: const Text('立即续费'),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
                       // 添加模式切换开关
                       SliverToBoxAdapter(
                         child: Padding(

@@ -12,9 +12,8 @@ import 'package:hiddify/core/widget/adaptive_menu.dart';
 import 'package:hiddify/features/common/confirmation_dialogs.dart';
 import 'package:hiddify/features/common/qr_code_dialog.dart';
 import 'package:hiddify/features/profile/model/profile_entity.dart';
-// import 'package:hiddify/features/profile/notifier/profile_notifier.dart'; // 已删除订阅更新功能，不再需要
+import 'package:hiddify/features/profile/notifier/profile_notifier.dart';
 import 'package:hiddify/features/profile/overview/profiles_overview_notifier.dart';
-import 'package:hiddify/gen/fonts.gen.dart';
 import 'package:hiddify/utils/utils.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:percent_indicator/percent_indicator.dart';
@@ -67,20 +66,19 @@ class ProfileTile extends HookConsumerWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // 删除订阅相关的操作按钮，因为订阅是自动从后台返回的，不需要手动操作
-            // if (profile is RemoteProfileEntity || !isMain) ...[
-            //   SizedBox(
-            //     width: 48,
-            //     child: Semantics(
-            //       sortKey: const OrdinalSortKey(1),
-            //       child: ProfileActionButton(profile, !isMain),
-            //     ),
-            //   ),
-            //   VerticalDivider(
-            //     width: 1,
-            //     color: effectiveOutlineColor,
-            //   ),
-            // ],
+            if (profile is RemoteProfileEntity || !isMain) ...[
+              SizedBox(
+                width: 48,
+                child: Semantics(
+                  sortKey: const OrdinalSortKey(1),
+                  child: ProfileActionButton(profile, !isMain),
+                ),
+              ),
+              VerticalDivider(
+                width: 1,
+                color: effectiveOutlineColor,
+              ),
+            ],
             Expanded(
               child: Semantics(
                 button: true,
@@ -90,17 +88,15 @@ class ProfileTile extends HookConsumerWidget {
                 namesRoute: isMain,
                 label: isMain ? t.profile.activeProfileBtnSemanticLabel : null,
                 child: InkWell(
-                  onTap: () {
-                    if (isMain) {
-                      const ProfilesOverviewRoute().go(context);
-                    } else {
-                      if (selectActiveMutation.state.isInProgress) return;
-                      if (profile.active) return;
-                      selectActiveMutation.setFuture(
-                        ref.read(profilesOverviewNotifierProvider.notifier).selectActiveProfile(profile.id),
-                      );
-                    }
-                  },
+                  onTap: isMain
+                      ? null
+                      : () {
+                          if (selectActiveMutation.state.isInProgress) return;
+                          if (profile.active) return;
+                          selectActiveMutation.setFuture(
+                            ref.read(profilesOverviewNotifierProvider.notifier).selectActiveProfile(profile.id),
+                          );
+                        },
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
@@ -126,17 +122,14 @@ class ProfileTile extends HookConsumerWidget {
                                       children: [
                                         Text(
                                           profile.name,
+                                          style: theme.textTheme.titleMedium?.copyWith(
+                                            fontWeight: FontWeight.bold,
+                                          ),
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
-                                          style: theme.textTheme.titleMedium?.copyWith(
-                                            fontFamily: FontFamily.emoji,
-                                          ),
-                                          semanticsLabel: t.profile.activeProfileNameSemanticLabel(
-                                            name: profile.name,
-                                          ),
                                         ),
                                         if (subInfo != null) ...[
-                                          const Gap(2),
+                                          const Gap(4),
                                           Text(
                                             subInfo.isExpired ? t.profile.subscription.expired : '到期: ${subInfo.expire.format()}',
                                             style: theme.textTheme.bodySmall?.copyWith(
@@ -149,7 +142,11 @@ class ProfileTile extends HookConsumerWidget {
                                       ],
                                     ),
                                   ),
-                                  // 删除下拉箭头，因为只有一个订阅地址
+                                  if (isMain)
+                                    Icon(
+                                      FluentIcons.caret_down_16_filled,
+                                      color: theme.colorScheme.onSurfaceVariant,
+                                    ),
                                 ],
                               ),
                             ),
@@ -160,14 +157,18 @@ class ProfileTile extends HookConsumerWidget {
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.titleMedium,
-                            semanticsLabel: profile.active
-                                ? t.profile.activeProfileNameSemanticLabel(
-                                    name: profile.name,
-                                  )
-                                : t.profile.nonActiveProfileBtnSemanticLabel(
-                                    name: profile.name,
-                                  ),
                           ),
+                        if (subInfo != null) ...[
+                          const Gap(4),
+                          Text(
+                            subInfo.isExpired ? t.profile.subscription.expired : '到期: ${subInfo.expire.format()}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: subInfo.isExpired ? theme.colorScheme.error : null,
+                            ),
+                          ),
+                        ],
                         if (subInfo != null) ...[
                           const Gap(4),
                           RemainingTrafficIndicator(subInfo.ratio),
@@ -196,8 +197,6 @@ class ProfileActionButton extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // 删除订阅更新按钮，因为订阅是自动从后台返回的，不需要手动更新
-    // 直接返回菜单，但菜单中也不包含更新选项
     return ProfileActionsMenu(
       profile,
       (context, toggleVisibility, _) {
@@ -240,18 +239,15 @@ class ProfileActionsMenu extends HookConsumerWidget {
     );
 
     final menuItems = [
-      // 删除订阅更新菜单项，因为订阅是自动从后台返回的，不需要手动更新
-      // if (profile case RemoteProfileEntity())
-      //   AdaptiveMenuItem(
-      //     title: t.profile.update.buttonTxt,
-      //     icon: FluentIcons.arrow_sync_24_regular,
-      //     onTap: () {
-      //       if (ref.read(updateProfileProvider(profile.id)).isLoading) {
-      //         return;
-      //       }
-      //       ref.read(updateProfileProvider(profile.id).notifier).updateProfile(profile as RemoteProfileEntity);
-      //     },
-      //   ),
+      if (profile case RemoteProfileEntity())
+        AdaptiveMenuItem(
+          title: t.profile.update.buttonTxt,
+          icon: FluentIcons.arrow_sync_24_regular,
+          onTap: () {
+            final updateNotifier = ref.read(updateProfileProvider(profile.id).notifier);
+            updateNotifier.updateProfile(profile as RemoteProfileEntity);
+          },
+        ),
       AdaptiveMenuItem(
         title: t.profile.share.buttonText,
         icon: AdaptiveIcon(context).share,

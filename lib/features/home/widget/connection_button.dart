@@ -9,9 +9,7 @@ import 'package:hiddify/features/config_option/data/config_option_repository.dar
 import 'package:hiddify/features/config_option/notifier/config_option_notifier.dart';
 import 'package:hiddify/features/connection/model/connection_status.dart';
 import 'package:hiddify/features/connection/notifier/connection_notifier.dart';
-import 'package:hiddify/core/router/routes.dart';
 import 'package:hiddify/features/connection/widget/experimental_feature_notice.dart';
-import 'package:hiddify/features/profile/model/profile_entity.dart';
 import 'package:hiddify/features/profile/notifier/active_profile_notifier.dart';
 import 'package:hiddify/features/proxy/active/active_proxy_notifier.dart';
 import 'package:hiddify/gen/assets.gen.dart';
@@ -28,17 +26,9 @@ class ConnectionButton extends HookConsumerWidget {
     final connectionStatus = ref.watch(connectionNotifierProvider);
     final activeProxy = ref.watch(activeProxyNotifierProvider);
     final delay = activeProxy.valueOrNull?.urlTestDelay ?? 0;
-    final activeProfile = ref.watch(activeProfileProvider);
 
     final requiresReconnect = ref.watch(configOptionNotifierProvider).valueOrNull;
     final today = DateTime.now();
-
-    // 检查订阅是否过期
-    final activeProfileValue = activeProfile.valueOrNull;
-    final isSubscriptionExpired = switch (activeProfileValue) {
-      RemoteProfileEntity(:final subInfo?) => subInfo.isExpired,
-      _ => false,
-    };
 
     ref.listen(
       connectionNotifierProvider,
@@ -66,32 +56,11 @@ class ConnectionButton extends HookConsumerWidget {
     return _ConnectionButton(
       onTap: switch (connectionStatus) {
         AsyncData(value: Disconnected()) || AsyncError() => () async {
-            // 如果订阅过期，阻止连接并显示提示
-            if (isSubscriptionExpired) {
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: const Text('订阅已过期，请续费后继续使用'),
-                    backgroundColor: Theme.of(context).colorScheme.error,
-                    action: SnackBarAction(
-                      label: '去续费',
-                      textColor: Colors.white,
-                      onPressed: () {
-                        const ShopRoute().go(context);
-                      },
-                    ),
-                    duration: const Duration(seconds: 4),
-                  ),
-                );
-              }
-              return;
-            }
             if (await showExperimentalNotice()) {
               return await ref.read(connectionNotifierProvider.notifier).toggleConnection();
             }
           },
         AsyncData(value: Connected()) => () async {
-            // 如果订阅过期，仍然允许断开连接
             if (requiresReconnect == true && await showExperimentalNotice()) {
               return await ref.read(connectionNotifierProvider.notifier).reconnect(await ref.read(activeProfileProvider.future));
             }
@@ -100,7 +69,7 @@ class ConnectionButton extends HookConsumerWidget {
         _ => () {},
       },
       enabled: switch (connectionStatus) {
-        AsyncData(value: Connected()) || AsyncData(value: Disconnected()) || AsyncError() => !isSubscriptionExpired,
+        AsyncData(value: Connected()) || AsyncData(value: Disconnected()) || AsyncError() => true,
         _ => false,
       },
       label: switch (connectionStatus) {

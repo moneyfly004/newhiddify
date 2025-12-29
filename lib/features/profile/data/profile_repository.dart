@@ -141,7 +141,6 @@ class ProfileRepositoryImpl with ExceptionHandler, InfraLogger implements Profil
       () async {
         final existingProfile = await profileDataSource.getByUrl(url).then((value) => value?.toEntity());
         if (existingProfile case RemoteProfileEntity()) {
-          loggy.info("profile with same url already exists, updating");
           final baseProfile = markAsActive ? existingProfile.copyWith(active: true) : existingProfile;
           return updateSubscription(
             baseProfile,
@@ -254,13 +253,14 @@ class ProfileRepositoryImpl with ExceptionHandler, InfraLogger implements Profil
         final existingProfile = await profileDataSource.getByUrl(baseProfile.url).then((value) => value?.toEntity());
         if (existingProfile case RemoteProfileEntity(:final id)) {
           loggy.info("profile with same url already exists, updating instead of adding");
-          // 更新现有订阅而不是新增
+          // 更新现有订阅而不是新增，使用 patchBaseProfile: true 来更新名称和更新间隔
           return updateSubscription(
             baseProfile.copyWith(id: id),
+            patchBaseProfile: true,
             cancelToken: cancelToken,
           ).run();
         }
-        
+
         return fetch(baseProfile.url, baseProfile.id, cancelToken: cancelToken)
             .flatMap(
               (remoteProfile) => TaskEither(() async {
@@ -309,14 +309,14 @@ class ProfileRepositoryImpl with ExceptionHandler, InfraLogger implements Profil
   }) {
     return exceptionHandler(
       () async {
-        loggy.debug(
-          "updating profile [${baseProfile.name} (${baseProfile.id})]",
-        );
         return fetch(baseProfile.url, baseProfile.id, cancelToken: cancelToken)
             .flatMap(
               (remoteProfile) => TaskEither(
                 () async {
-                  final profilePatch = remoteProfile.subInfoPatch().copyWith(lastUpdate: Value(DateTime.now()), active: Value(baseProfile.active));
+                  final profilePatch = remoteProfile.subInfoPatch().copyWith(
+                        lastUpdate: Value(DateTime.now()),
+                        active: Value(baseProfile.active),
+                      );
 
                   await profileDataSource.edit(
                     baseProfile.id,
@@ -336,7 +336,6 @@ class ProfileRepositoryImpl with ExceptionHandler, InfraLogger implements Profil
             .run();
       },
       (error, stackTrace) {
-        loggy.warning("error updating profile", error, stackTrace);
         return ProfileUnexpectedFailure(error, stackTrace);
       },
     );
@@ -415,7 +414,39 @@ class ProfileRepositoryImpl with ExceptionHandler, InfraLogger implements Profil
             cancelToken: cancelToken,
             userAgent: configs.useXrayCoreWhenPossible ? "v2rayNG/1.8.23" : null,
           );
+
+          // 检查下载的文件内容，如果是Base64编码的，需要先解码
+          final tempContent = await tempFile.readAsString();
+
+          // 检查内容是否为空或无效
+          if (tempContent.trim().isEmpty) {
+            return left(ProfileUnexpectedFailure(
+              Exception("下载的订阅配置内容为空"),
+              StackTrace.current,
+            ));
+          }
+
+          // 尝试Base64解码
+          String finalContent = tempContent;
+          try {
+            final decodedContent = safeDecodeBase64(tempContent);
+            // 如果解码成功且内容不同，使用解码后的内容
+            if (decodedContent != tempContent && decodedContent.trim().isNotEmpty) {
+              // 检查解码后的内容是否是有效的JSON或YAML
+              final trimmed = decodedContent.trim();
+              if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.contains('outbounds')) {
+                finalContent = decodedContent;
+              }
+            }
+          } catch (e) {
+            // Base64解码失败，使用原始内容
+          }
+
+          // 保存最终内容到临时文件
+          await tempFile.writeAsString(finalContent);
+
           final headers = await _populateHeaders(response.headers.map, tempFile.path);
+
           return await validateConfig(file.path, tempFile.path, false)
               .andThen(
                 () => TaskEither(() async {

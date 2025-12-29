@@ -139,15 +139,59 @@ class MethodHandler(private val scope: CoroutineScope) : FlutterPlugin,
                 scope.launch {
                     result.runCatching {
                         val args = call.arguments as Map<*, *>
-                        Settings.activeConfigPath = args["path"] as String? ?: ""
-                        Settings.activeProfileName = args["name"] as String? ?: ""
+                        val configPath = args["path"] as String? ?: ""
+                        val profileName = args["name"] as String? ?: ""
+                        
+                        Log.d(TAG, "=== Start service called ===")
+                        Log.d(TAG, "Config path: $configPath")
+                        Log.d(TAG, "Profile name: $profileName")
+                        
+                        // 验证配置路径
+                        if (configPath.isBlank()) {
+                            Log.e(TAG, "❌ Config path is blank")
+                            error("Configuration path is empty")
+                            return@launch
+                        }
+                        
+                        // 验证配置文件是否存在
+                        val configFile = File(configPath)
+                        if (!configFile.exists()) {
+                            Log.e(TAG, "❌ Config file does not exist: $configPath")
+                            Log.e(TAG, "Absolute path: ${configFile.absolutePath}")
+                            error("Configuration file not found: $configPath")
+                            return@launch
+                        }
+                        
+                        if (!configFile.canRead()) {
+                            Log.e(TAG, "❌ Config file is not readable: $configPath")
+                            error("Configuration file is not readable: $configPath")
+                            return@launch
+                        }
+                        
+                        if (configFile.length() == 0L) {
+                            Log.e(TAG, "❌ Config file is empty: $configPath")
+                            error("Configuration file is empty: $configPath")
+                            return@launch
+                        }
+                        
+                        Log.d(TAG, "✅ Config file validation passed")
+                        Log.d(TAG, "Config file size: ${configFile.length()} bytes")
+                        
+                        Settings.activeConfigPath = configPath
+                        Settings.activeProfileName = profileName
+                        
+                        Log.d(TAG, "Settings updated: activeConfigPath=${Settings.activeConfigPath}, activeProfileName=${Settings.activeProfileName}")
+                        
                         val mainActivity = MainActivity.instance
                         val started = mainActivity.serviceStatus.value == Status.Started
                         if (started) {
-                            Log.w(TAG, "service is already running")
+                            Log.w(TAG, "⚠️ Service is already running")
                             return@launch success(true)
                         }
+                        
+                        Log.d(TAG, "Calling mainActivity.startService()...")
                         mainActivity.startService()
+                        Log.d(TAG, "✅ startService() called")
                         success(true)
                     }
                 }

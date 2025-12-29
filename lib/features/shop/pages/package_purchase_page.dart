@@ -1,9 +1,14 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:gap/gap.dart';
+import 'package:hiddify/core/http_client/http_client_provider.dart';
+import 'package:hiddify/core/preferences/preferences_provider.dart';
+import 'package:hiddify/features/auth/data/auth_data_providers.dart';
+import 'package:hiddify/features/auth/notifier/auth_notifier.dart';
 import 'package:hiddify/features/profile/notifier/active_profile_notifier.dart';
 import 'package:hiddify/features/shop/data/package_data_providers.dart';
 import 'package:hiddify/utils/custom_loggers.dart';
@@ -106,17 +111,23 @@ class PackagePurchasePage extends HookConsumerWidget with InfraLogger {
 
             try {
               final packageApi = ref.read(packageApiProvider);
+              loggy.debug("🔄 轮询订单状态: orderNo=$orderNo");
               final statusData = await packageApi.getOrderStatus(orderNo);
 
               if (statusData != null && context.mounted && !isDisposed) {
                 final status = statusData['status'] as String?;
+                loggy.debug("📊 订单状态: orderNo=$orderNo, status=$status");
+
                 if (status == 'paid') {
+                  loggy.info("✅ 订单支付成功！orderNo=$orderNo");
                   isPaid = true;
                   timer.cancel();
                   timeoutTimer?.cancel();
 
                   // 刷新订阅信息
+                  loggy.info("🔄 正在刷新订阅信息...");
                   ref.invalidate(activeProfileProvider);
+                  loggy.info("✅ 订阅信息已刷新，套餐已生效");
 
                   if (dialogContext.mounted) {
                     Navigator.of(dialogContext).pop();
@@ -129,10 +140,12 @@ class PackagePurchasePage extends HookConsumerWidget with InfraLogger {
                       ),
                     );
                   }
+                } else {
+                  loggy.debug("⏳ 订单状态: $status，继续等待支付...");
                 }
               }
             } catch (e) {
-              loggy.warning("查询订单状态失败", e, StackTrace.current);
+              loggy.error("❌ 查询订单状态失败: orderNo=$orderNo", e, StackTrace.current);
               // 继续轮询，不中断
             }
           });
@@ -232,6 +245,103 @@ class PackagePurchasePage extends HookConsumerWidget with InfraLogger {
     Future<void> handlePurchase() async {
       if (isLoading.value) return;
 
+      // 检查用户是否已登录
+      final authState = ref.read(authNotifierProvider);
+      final isAuthenticated = authState.valueOrNull?.valueOrNull != null;
+
+      if (!isAuthenticated) {
+        errorMessage.value = '请先登录后再购买套餐';
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('请先登录后再购买套餐'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      // 确保 token 已设置到 HTTP 客户端，并验证 token 是否有效
+      final prefs = await ref.read(sharedPreferencesProvider.future);
+      final accessToken = prefs.getString('access_token');
+      final refreshToken = prefs.getString('refresh_token');
+
+      if (accessToken == null) {
+        errorMessage.value = '登录状态异常，请重新登录';
+        isLoading.value = false;
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('登录状态异常，请重新登录'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      // 设置 token 到 HTTP 客户端
+      ref.read(httpClientProvider).setAccessToken(accessToken);
+      loggy.debug("已确保设置AccessToken到HTTP客户端");
+
+      // 验证 token 是否有效，如果无效则尝试刷新
+      bool tokenValid = false;
+      try {
+        final authRepo = ref.read(authRepositoryProvider);
+        final userResult = await authRepo.getCurrentUser().run();
+        await userResult.fold(
+          (failure) async {
+            // Token 无效，尝试刷新
+            loggy.warning("Token验证失败，尝试刷新token");
+            if (refreshToken != null) {
+              final refreshResult = await authRepo.refreshToken(refreshToken).run();
+              await refreshResult.fold(
+                (refreshFailure) {
+                  // 刷新失败，需要重新登录
+                  loggy.error("Token刷新失败，需要重新登录");
+                  tokenValid = false;
+                },
+                (authResponse) async {
+                  // 刷新成功，保存新 token 并更新 HTTP 客户端
+                  await prefs.setString('access_token', authResponse.accessToken);
+                  await prefs.setString('refresh_token', authResponse.refreshToken);
+                  ref.read(httpClientProvider).setAccessToken(authResponse.accessToken);
+                  loggy.info("Token刷新成功，已更新");
+                  tokenValid = true;
+                },
+              );
+            } else {
+              tokenValid = false;
+            }
+          },
+          (user) {
+            // Token 有效，继续
+            loggy.debug("Token验证成功，用户: ${user.email}");
+            tokenValid = true;
+          },
+        );
+      } catch (e) {
+        loggy.error("验证token时发生异常", e, StackTrace.current);
+        // 如果验证过程出错，继续尝试创建订单，如果失败会显示具体错误
+        tokenValid = true; // 允许继续尝试
+      }
+
+      // 如果 token 无效且刷新失败，停止创建订单
+      if (!tokenValid) {
+        errorMessage.value = '登录已过期，请重新登录';
+        isLoading.value = false;
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('登录已过期，请重新登录'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
       isLoading.value = true;
       errorMessage.value = null;
 
@@ -240,23 +350,58 @@ class PackagePurchasePage extends HookConsumerWidget with InfraLogger {
         final packageApi = ref.read(packageApiProvider);
         final couponCode = couponCodeController.text.trim();
 
+        loggy.info("💰 开始创建订单: packageId=$packageId, couponCode=$couponCode, price=¥$finalPrice");
+
         // 创建订单（如果输入了优惠券但未验证，先验证再创建）
         String? finalCouponCode = couponCode;
         if (couponCode.isNotEmpty && couponInfo.value == null) {
           // 如果输入了优惠券但未验证，先验证
+          loggy.info("🎫 验证优惠券: $couponCode");
           await verifyCouponCode();
           if (couponInfo.value == null) {
             // 验证失败，不创建订单
+            loggy.error("❌ 优惠券验证失败，取消订单创建");
             isLoading.value = false;
             return;
           }
+          loggy.info("✅ 优惠券验证成功");
           finalCouponCode = couponCode;
         }
 
+        // 获取支付方式列表，选择第一个可用的支付方式（优先选择 alipay）
+        String? selectedPaymentMethod;
+        int? selectedPaymentMethodId;
+        try {
+          loggy.info("💳 获取支付方式列表...");
+          final paymentMethods = await packageApi.getPaymentMethods();
+          loggy.debug("获取到支付方式列表: $paymentMethods");
+
+          if (paymentMethods.isNotEmpty) {
+            // 优先选择 alipay
+            var alipayMethod = paymentMethods.firstWhere(
+              (method) => (method['key'] as String?)?.toLowerCase() == 'alipay',
+              orElse: () => paymentMethods.first,
+            );
+            selectedPaymentMethod = alipayMethod['key'] as String?;
+            selectedPaymentMethodId = alipayMethod['id'] as int?;
+            loggy.info("✅ 选择支付方式: $selectedPaymentMethod (ID: $selectedPaymentMethodId)");
+          } else {
+            // 如果没有可用的支付方式，默认使用 alipay
+            selectedPaymentMethod = 'alipay';
+            loggy.warning("⚠️ 未获取到支付方式列表，使用默认支付方式: alipay");
+          }
+        } catch (e) {
+          // 如果获取支付方式失败，默认使用 alipay
+          selectedPaymentMethod = 'alipay';
+          loggy.error("❌ 获取支付方式列表失败，使用默认支付方式: alipay", e, StackTrace.current);
+        }
+
         // 创建订单
+        loggy.info("📝 正在创建订单...");
         final order = await packageApi.createOrder(
           packageId: packageId,
           couponCode: finalCouponCode.isEmpty ? null : finalCouponCode,
+          paymentMethod: selectedPaymentMethod,
         );
 
         if (order != null && context.mounted) {
@@ -264,17 +409,21 @@ class PackagePurchasePage extends HookConsumerWidget with InfraLogger {
           final paymentUrl = order['payment_url'] as String?;
           final paymentQrCode = order['payment_qr_code'] as String?;
           // 优先使用 payment_qr_code，如果没有则使用 payment_url
-          final qrCodeUrl = paymentQrCode ?? paymentUrl;
+          var qrCodeUrl = paymentQrCode ?? paymentUrl;
           final orderStatus = order['status'] as String?;
           final orderNo = order['order_no'] as String? ?? '';
           // 使用订单返回的金额，如果没有则使用最终价格（考虑优惠券）
           final amount = order['final_amount'] ?? order['amount'] ?? finalPrice;
 
+          loggy.info("📦 订单创建成功: orderNo=$orderNo, status=$orderStatus, amount=¥${(amount as num).toDouble()}");
+
           if (orderStatus == 'paid') {
             // 订单已支付
+            loggy.info("✅ 订单已支付，正在激活订阅...");
             if (context.mounted) {
               // 刷新订阅信息
               ref.invalidate(activeProfileProvider);
+              loggy.info("🔄 已刷新订阅信息");
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text('订单已支付成功！您的订阅已激活'),
@@ -284,6 +433,7 @@ class PackagePurchasePage extends HookConsumerWidget with InfraLogger {
               Navigator.of(context).pop(true); // 返回并刷新
             }
           } else if (qrCodeUrl != null && qrCodeUrl.isNotEmpty) {
+            loggy.info("💳 显示支付二维码: orderNo=$orderNo");
             // 有支付URL，显示二维码对话框（使用QrImageView生成二维码）
             if (context.mounted) {
               await _showPaymentDialog(
@@ -314,28 +464,113 @@ class PackagePurchasePage extends HookConsumerWidget with InfraLogger {
               }
             }
           } else {
-            // 订单创建成功但无支付链接
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('订单创建成功: $orderNo'),
-                ),
-              );
-              Navigator.of(context).pop(true);
+            // 订单创建成功但无支付链接，尝试调用支付API生成支付链接
+            if (selectedPaymentMethodId != null && orderNo.isNotEmpty) {
+              loggy.debug("订单创建成功但无支付链接，尝试调用支付API生成: orderNo=$orderNo, paymentMethodId=$selectedPaymentMethodId");
+              try {
+                final paymentResult = await packageApi.payOrder(
+                  orderNo: orderNo,
+                  paymentMethodId: selectedPaymentMethodId,
+                );
+
+                if (paymentResult != null) {
+                  final paymentUrlFromPay = paymentResult['payment_url'] as String?;
+                  if (paymentUrlFromPay != null && paymentUrlFromPay.isNotEmpty) {
+                    loggy.info("✅ 通过支付API成功生成支付链接: orderNo=$orderNo");
+                    qrCodeUrl = paymentUrlFromPay;
+                    if (context.mounted) {
+                      await _showPaymentDialog(
+                        context,
+                        ref,
+                        orderNo,
+                        (amount as num).toDouble(),
+                        qrCodeUrl,
+                        paymentUrlFromPay,
+                      );
+                    }
+                  } else {
+                    loggy.error("❌ 支付API返回的支付链接为空: orderNo=$orderNo");
+                    throw Exception('支付API返回的支付链接为空');
+                  }
+                } else {
+                  loggy.error("❌ 支付API返回空数据: orderNo=$orderNo");
+                  throw Exception('支付API返回空数据');
+                }
+              } catch (e) {
+                loggy.error("❌ 调用支付API失败: orderNo=$orderNo", e, StackTrace.current);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('订单创建成功，但生成支付链接失败: ${e.toString()}'),
+                      backgroundColor: Colors.orange,
+                      duration: const Duration(seconds: 5),
+                    ),
+                  );
+                  Navigator.of(context).pop(true);
+                }
+              }
+            } else {
+              // 订单创建成功但无支付链接，且无法生成
+              loggy.warning("⚠️ 订单创建成功但无支付链接，且无法生成: orderNo=$orderNo");
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('订单创建成功: $orderNo，但无法生成支付链接，请稍后前往订单页面支付'),
+                    backgroundColor: Colors.orange,
+                    duration: const Duration(seconds: 5),
+                  ),
+                );
+                Navigator.of(context).pop(true);
+              }
             }
           }
         } else {
           errorMessage.value = '创建订单失败：服务器返回空数据';
         }
-      } catch (e) {
+      } catch (e, stackTrace) {
         // 捕获并显示具体错误信息
-        final errorMsg = e.toString();
-        if (errorMsg.contains('Exception:')) {
-          errorMessage.value = errorMsg.replaceFirst('Exception: ', '');
+        loggy.error("购买失败", e, stackTrace);
+
+        String userFriendlyMsg;
+
+        // 处理特定的错误类型
+        if (e is DioException) {
+          final statusCode = e.response?.statusCode;
+          final responseData = e.response?.data;
+          loggy.error("DioException详情: statusCode=$statusCode, responseData=$responseData");
+
+          if (statusCode == 403) {
+            userFriendlyMsg = '创建订单失败：权限不足。请确保您已登录且账户未被禁用。如果问题持续，请尝试重新登录。';
+          } else if (statusCode == 401) {
+            userFriendlyMsg = '创建订单失败：未授权。请重新登录后重试。';
+          } else {
+            final errorMsg = responseData?['message'] as String? ?? responseData?['error'] as String? ?? e.message ?? '创建订单失败';
+            userFriendlyMsg = errorMsg;
+          }
         } else {
-          errorMessage.value = '创建订单失败: $errorMsg';
+          String errorMsg = e.toString();
+          if (errorMsg.contains('403') || errorMsg.contains('Forbidden')) {
+            userFriendlyMsg = '创建订单失败：权限不足。请确保您已登录且账户未被禁用。如果问题持续，请尝试重新登录。';
+          } else if (errorMsg.contains('401') || errorMsg.contains('Unauthorized')) {
+            userFriendlyMsg = '创建订单失败：未授权。请重新登录后重试。';
+          } else if (errorMsg.contains('Exception:')) {
+            userFriendlyMsg = errorMsg.replaceFirst('Exception: ', '');
+          } else {
+            userFriendlyMsg = '创建订单失败: $errorMsg';
+          }
         }
-        loggy.error("购买失败", e, StackTrace.current);
+
+        errorMessage.value = userFriendlyMsg;
+
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(userFriendlyMsg),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
       } finally {
         isLoading.value = false;
       }
