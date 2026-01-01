@@ -207,7 +207,8 @@ class AppSettings {
       autoConnect: prefs.getBool('autoConnect') ?? false,
       themeColor: prefs.getInt('themeColor') ?? 0xFF00FF00,
       nightMode: NightMode.values[prefs.getInt('nightMode') ?? 0],
-      serviceMode: ServiceMode.values[prefs.getInt('serviceMode') ?? 0],
+      // 默认使用 VPN 模式（索引 0 = vpn）
+      serviceMode: ServiceMode.values[prefs.getInt('serviceMode') ?? ServiceMode.vpn.index],
       tunImplementation: TunImplementation.values[prefs.getInt('tunImplementation') ?? 0],
       mtu: prefs.getInt('mtu') ?? 9000,
       speedInterval: prefs.getInt('speedInterval') ?? 1000,

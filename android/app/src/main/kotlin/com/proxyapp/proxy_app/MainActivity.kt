@@ -17,18 +17,25 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileWriter
 import java.io.IOException
+import libcore.BoxInstance
+import libcore.Libcore
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.proxyapp/kernel"
     private val APP_INFO_CHANNEL = "com.proxyapp/app_info"
     private val FOREGROUND_SERVICE_CHANNEL = "com.proxyapp/foreground_service"
-    private var singboxProcess: Process? = null
+    private var singboxInstance: BoxInstance? = null
     private var mihomoProcess: Process? = null
     private lateinit var permissionHandler: PermissionHandler
     private lateinit var appInfoHandler: AppInfoHandler
+    private lateinit var speedTestHandler: SpeedTestHandler
+    private var isLibcoreInitialized = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        
+        // 初始化 libcore 日志系统
+        initLibcore()
         
         // 初始化权限处理器
         permissionHandler = PermissionHandler(this)
@@ -36,6 +43,10 @@ class MainActivity: FlutterActivity() {
         
         // 初始化应用信息处理器
         appInfoHandler = AppInfoHandler(packageManager)
+        
+        // 初始化测速处理器
+        speedTestHandler = SpeedTestHandler(applicationContext)
+        speedTestHandler.setupMethodChannel(flutterEngine)
         
         // 设置应用信息 MethodChannel
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, APP_INFO_CHANNEL).setMethodCallHandler { call, result ->
@@ -138,50 +149,93 @@ class MainActivity: FlutterActivity() {
         mihomoProcess?.destroy()
         mihomoProcess = null
         
-        // 写入配置文件
-        val configFile = File(applicationContext.filesDir, "singbox.json")
+        // 停止之前的实例（确保完全关闭）
         try {
-            FileWriter(configFile).use { writer ->
-                writer.write(config ?: "{}")
+            singboxInstance?.close()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "关闭之前的 Sing-box 实例失败", e)
+        }
+        singboxInstance = null
+        
+        // 启动 VPN Service（必须在启动 Sing-box 之前）
+        startVpnService()
+        
+        // 等待 VPN Service 完全启动（最多等待 2 秒）
+        var waitCount = 0
+        while (VpnService.getInstance() == null && waitCount < 20) {
+            Thread.sleep(100)
+            waitCount++
+        }
+        
+        if (VpnService.getInstance() == null) {
+            Log.e("MainActivity", "VPN Service 启动超时")
+            throw IOException("VPN Service 启动超时")
+        }
+        
+        Log.d("MainActivity", "VPN Service 已就绪")
+        
+        // 等待一小段时间，确保端口释放
+        Thread.sleep(200)
+        
+        try {
+            val configJson = config ?: "{}"
+            Log.d("MainActivity", "使用 libcore.aar 启动 Sing-box")
+            Log.d("MainActivity", "配置长度: ${configJson.length}")
+            
+            // 使用 libcore.aar 的 API 创建 BoxInstance
+            singboxInstance = Libcore.newSingBoxInstance(configJson, SimpleLocalResolver)
+            
+            // 启动 BoxInstance
+            singboxInstance?.start()
+            
+            Log.d("MainActivity", "Sing-box 已成功启动（使用 libcore.aar）")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "启动 Sing-box 失败", e)
+            singboxInstance?.close()
+            singboxInstance = null
+            stopVpnService()
+            throw IOException("启动 Sing-box 失败: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * 启动 VPN Service
+     */
+    private fun startVpnService() {
+        try {
+            val intent = Intent(this, VpnService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
             }
-        } catch (e: IOException) {
-            Log.e("MainActivity", "写入 Sing-box 配置失败", e)
-            throw e
+            Log.d("MainActivity", "VPN Service 已启动")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "启动 VPN Service 失败", e)
         }
-        
-        // 启动 singbox 进程
-        // 注意：实际使用时需要将 libsingbox.so 放在 jniLibs 目录下
-        val libDir = applicationContext.applicationInfo.nativeLibraryDir
-        val singboxLib = File(libDir, "libsingbox.so")
-        
-        if (!singboxLib.exists()) {
-            Log.w("MainActivity", "Sing-box 库文件不存在: ${singboxLib.absolutePath}")
-            // 这里可以返回错误或使用备用方案
-            throw IOException("Sing-box 库文件不存在")
-        }
-        
-        val command = listOf(
-            singboxLib.absolutePath,
-            "run",
-            "-c",
-            configFile.absolutePath
-        )
-        
+    }
+    
+    /**
+     * 停止 VPN Service
+     */
+    private fun stopVpnService() {
         try {
-            singboxProcess = ProcessBuilder(command)
-                .redirectErrorStream(true)
-                .start()
-            Log.d("MainActivity", "Sing-box 进程已启动")
-        } catch (e: IOException) {
-            Log.e("MainActivity", "启动 Sing-box 进程失败", e)
-            throw e
+            val intent = Intent(this, VpnService::class.java)
+            stopService(intent)
+            Log.d("MainActivity", "VPN Service 已停止")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "停止 VPN Service 失败", e)
         }
     }
     
     private fun startMihomo(config: String?) {
         // 停止其他内核
-        singboxProcess?.destroy()
-        singboxProcess = null
+        try {
+            singboxInstance?.close()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "停止 Sing-box 失败", e)
+        }
+        singboxInstance = null
         
         // 写入配置文件
         val configFile = File(applicationContext.filesDir, "mihomo.yaml")
@@ -223,17 +277,32 @@ class MainActivity: FlutterActivity() {
     }
     
     private fun stopAllKernels() {
-        singboxProcess?.destroy()
-        singboxProcess = null
+        // 先停止内核
+        try {
+            singboxInstance?.close()
+        } catch (e: Exception) {
+            Log.e("MainActivity", "停止 Sing-box 失败", e)
+        }
+        singboxInstance = null
         
         mihomoProcess?.destroy()
         mihomoProcess = null
+        
+        // 然后关闭 VPN Service（确保 VPN 接口被关闭）
+        val vpnService = VpnService.getInstance()
+        if (vpnService != null) {
+            vpnService.closeVpn()
+        }
+        
+        // 最后停止 VPN Service
+        stopVpnService()
         
         Log.d("MainActivity", "所有代理内核已停止")
     }
     
     private fun getKernelStatus(): Map<String, Any> {
-        val isSingboxRunning = singboxProcess?.isAlive ?: false
+        // 简化状态检查：如果实例存在则认为正在运行
+        val isSingboxRunning = singboxInstance != null
         val isMihomoRunning = mihomoProcess?.isAlive ?: false
         
         return mapOf(
@@ -246,7 +315,11 @@ class MainActivity: FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (::permissionHandler.isInitialized) {
-            permissionHandler.onActivityResult(requestCode, resultCode)
+            val handled = permissionHandler.onActivityResult(requestCode, resultCode)
+            if (!handled) {
+                // 如果 PermissionHandler 没有处理，可能是其他请求
+                Log.d("MainActivity", "onActivityResult: requestCode=$requestCode, resultCode=$resultCode")
+            }
         }
     }
 
@@ -324,5 +397,44 @@ class MainActivity: FlutterActivity() {
         notificationManager.notify(NOTIFICATION_ID, notification)
         
         Log.d("MainActivity", "通知已更新: $title - $content")
+    }
+    
+    /**
+     * 初始化 libcore 日志系统
+     * 必须在调用 newSingBoxInstance 之前调用
+     */
+    private fun initLibcore() {
+        if (isLibcoreInitialized) {
+            return
+        }
+        
+        try {
+            val process = applicationContext.packageName
+            val cachePath = cacheDir.absolutePath + "/"
+            val filesPath = filesDir.absolutePath + "/"
+            val externalAssets = getExternalFilesDir(null)?.absolutePath ?: filesDir.absolutePath
+            val externalAssetsPath = externalAssets + "/"
+            
+            val nativeInterface = MinimalNativeInterface(applicationContext)
+            
+            // 初始化 libcore（设置日志系统）
+            Libcore.initCore(
+                process,
+                cachePath,
+                filesPath,
+                externalAssetsPath,
+                1024, // maxLogSizeKb: 1MB
+                true,  // logEnable: true
+                nativeInterface,
+                nativeInterface,
+                SimpleLocalResolver
+            )
+            
+            isLibcoreInitialized = true
+            Log.d("MainActivity", "libcore 初始化成功")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "初始化 libcore 失败", e)
+            // 即使初始化失败，也继续尝试使用（可能会在 newSingBoxInstance 时失败）
+        }
     }
 }

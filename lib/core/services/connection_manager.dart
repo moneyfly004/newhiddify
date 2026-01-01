@@ -9,8 +9,10 @@ import 'foreground_service.dart';
 import 'storage_service.dart';
 import 'base64_subscription_parser.dart';
 import 'kernel_switcher_with_conversion.dart';
+import 'settings_service.dart';
 import '../models/kernel_type.dart';
 import '../models/connection_mode.dart';
+import '../models/app_settings.dart';
 import 'package:flutter/foundation.dart';
 import '../utils/logger.dart';
 import '../utils/network_utils.dart';
@@ -144,11 +146,43 @@ class ConnectionManager {
 
       // 从 Base64 订阅生成配置
       debugPrint('[ConnectionManager] 生成内核配置...');
+      
+      // 获取设置（服务模式、允许访问、混合端口等）
+      final settingsService = SettingsService.instance;
+      await settingsService.initialize();
+      final settings = settingsService.settings;
+      final isVpnMode = settings.serviceMode == ServiceMode.vpn;
+      final allowAccess = settings.allowAccess;
+      final mixedPort = settings.mixedPort;
+      
+      final bypassLan = settings.bypassLan;
+      final remoteDnsList = settings.remoteDns.split('\n')
+          .where((dns) => dns.trim().isNotEmpty && !dns.trim().startsWith('#'))
+          .map((dns) => dns.trim())
+          .toList();
+      final directDnsList = settings.directDns.split('\n')
+          .where((dns) => dns.trim().isNotEmpty && !dns.trim().startsWith('#'))
+          .map((dns) => dns.trim())
+          .toList();
+      
+      debugPrint('[ConnectionManager] 服务模式: ${isVpnMode ? "VPN" : "代理"}');
+      debugPrint('[ConnectionManager] 允许访问: $allowAccess');
+      debugPrint('[ConnectionManager] 混合端口: $mixedPort');
+      debugPrint('[ConnectionManager] 绕过局域网: $bypassLan');
+      debugPrint('[ConnectionManager] 远程 DNS: $remoteDnsList');
+      debugPrint('[ConnectionManager] 直连 DNS: $directDnsList');
+      
       final config = await _generateConfigFromBase64(
         base64Content,
         subscription,
         mode ?? _currentMode,
         node,
+        isVpnMode: isVpnMode,
+        allowAccess: allowAccess,
+        mixedPort: mixedPort,
+        bypassLan: bypassLan,
+        remoteDns: remoteDnsList.isNotEmpty ? remoteDnsList : ['https://dns.google/dns-query'],
+        directDns: directDnsList.isNotEmpty ? directDnsList : ['https://223.5.5.5/dns-query'],
       );
       debugPrint('[ConnectionManager] 配置生成完成，长度: ${config.length}');
 
@@ -269,8 +303,14 @@ class ConnectionManager {
     String base64Content,
     Subscription subscription,
     ConnectionMode mode,
-    Node? selectedNode,
-  ) async {
+    Node? selectedNode, {
+    bool? isVpnMode,
+    bool? allowAccess,
+    int? mixedPort,
+    bool? bypassLan,
+    List<String>? remoteDns,
+    List<String>? directDns,
+  }) async {
     Node? targetNode = selectedNode;
     
     // 如果提供了节点，直接使用；否则从 Base64 订阅解析
@@ -303,6 +343,12 @@ class ConnectionManager {
       mode: mode,
       selectedNode: targetNode,
       rawConfig: null, // 不使用原始配置，直接生成
+      isVpnMode: isVpnMode,
+      allowAccess: allowAccess,
+      mixedPort: mixedPort,
+      bypassLan: bypassLan,
+      remoteDns: remoteDns,
+      directDns: directDns,
     );
   }
 

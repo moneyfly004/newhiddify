@@ -1,6 +1,11 @@
 import 'dart:async';
+import 'package:flutter/services.dart';
 import '../../features/servers/models/node.dart';
+import '../../features/servers/models/subscription.dart';
 import '../../features/servers/repositories/node_repository.dart';
+import '../models/kernel_type.dart';
+import '../models/connection_mode.dart';
+import 'kernel_config_generator.dart';
 
 /// 测速结果
 class SpeedTestResult {
@@ -138,20 +143,33 @@ class SpeedTestEngine {
     }
   }
 
-  /// 测试单个节点
+  /// 测试单个节点（使用 Sing-box 核心进行真实连接测试）
   Future<SpeedTestResult> _testSingleNode(Node node) async {
     try {
-      if (_nodeRepository == null) {
-        throw Exception('NodeRepository 未初始化');
+      // 使用 Sing-box 核心进行真实连接测速
+      // 需要生成节点的 Sing-box 配置
+      final config = await _generateTestConfig(node);
+      
+      // 调用原生方法进行测速
+      const platform = MethodChannel('com.proxyapp/speed_test');
+      final latency = await platform.invokeMethod<int>('testNode', {
+        'config': config,
+        'testUrl': 'https://www.google.com/generate_204',
+        'timeout': 5000,
+      });
+      
+      if (latency == null || latency < 0) {
+        return SpeedTestResult(
+          node: node,
+          available: false,
+        );
       }
-      // 使用后端 API 测试节点
-      final testResult = await _nodeRepository!.testNode(node.id);
-
+      
       return SpeedTestResult(
         node: node,
-        latency: testResult.latency,
-        downloadSpeed: testResult.downloadSpeed,
-        available: testResult.available,
+        latency: latency,
+        downloadSpeed: null, // Sing-box 测速只返回延迟
+        available: true,
       );
     } catch (e) {
       return SpeedTestResult(
@@ -159,6 +177,28 @@ class SpeedTestEngine {
         available: false,
       );
     }
+  }
+  
+  /// 生成测试用的 Sing-box 配置
+  Future<String> _generateTestConfig(Node node) async {
+    // 创建一个测试用的订阅对象
+    final subscription = Subscription(
+      id: 'test',
+      subscriptionUrl: '',
+      expireTime: DateTime.now().add(const Duration(days: 365)),
+      isActive: true,
+      status: 'active',
+      deviceLimit: 0,
+      usedDevices: 0,
+    );
+    
+    // 生成只包含该节点的测试配置
+    return await KernelConfigGenerator.generateConfig(
+      kernelType: KernelType.singbox,
+      subscription: subscription,
+      mode: ConnectionMode.global,
+      selectedNode: node,
+    );
   }
 
   /// 批量测试节点

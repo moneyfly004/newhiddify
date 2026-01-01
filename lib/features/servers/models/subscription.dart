@@ -31,7 +31,8 @@ class Subscription {
       isActive: json['is_active'] as bool? ?? false,
       status: json['status'] as String? ?? 'inactive',
       deviceLimit: json['device_limit'] as int? ?? 0,
-      usedDevices: json['used_devices'] as int?,
+      // 修复：使用 current_devices 而不是 used_devices（根据后台 API）
+      usedDevices: json['current_devices'] as int? ?? json['used_devices'] as int?,
     );
   }
 

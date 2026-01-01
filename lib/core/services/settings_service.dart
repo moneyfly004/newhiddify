@@ -22,8 +22,14 @@ class SettingsService {
   Future<void> initialize() async {
     try {
       _settings = await AppSettings.load();
+      // 确保服务模式是 VPN（如果之前被设置为代理，强制重置为 VPN）
+      if (_settings!.serviceMode != ServiceMode.vpn) {
+        Logger.info('检测到服务模式为代理，强制重置为 VPN 模式');
+        _settings = _settings!.copyWith(serviceMode: ServiceMode.vpn);
+        await _settings!.save();
+      }
       _settingsController.add(_settings!);
-      Logger.info('设置加载成功');
+      Logger.info('设置加载成功，服务模式: ${_settings!.serviceMode.name}');
     } catch (e) {
       Logger.error('设置加载失败', e);
       _settings = AppSettings();

@@ -18,6 +18,12 @@ class KernelConfigGenerator {
     required ConnectionMode mode,
     Node? selectedNode,
     String? rawConfig,
+    bool? isVpnMode,
+    bool? allowAccess,
+    int? mixedPort,
+    bool? bypassLan,
+    List<String>? remoteDns,
+    List<String>? directDns,
   }) async {
     // 如果有原始配置，先解析
     if (rawConfig != null) {
@@ -27,7 +33,17 @@ class KernelConfigGenerator {
     // 否则根据内核类型生成
     switch (kernelType) {
       case KernelType.singbox:
-        return _generateSingboxConfig(subscription, mode, selectedNode);
+        return _generateSingboxConfig(
+          subscription,
+          mode,
+          selectedNode,
+          isVpnMode: isVpnMode ?? true,
+          allowAccess: allowAccess ?? false,
+          mixedPort: mixedPort ?? 2080,
+          bypassLan: bypassLan ?? true,
+          remoteDns: remoteDns,
+          directDns: directDns,
+        );
       case KernelType.mihomo:
         return _generateClashConfig(subscription, mode, selectedNode);
     }
@@ -99,8 +115,10 @@ class KernelConfigGenerator {
           'final': 'proxy',
         };
       } else {
+        // 获取规则并确保格式正确
+        final rules = RuleManager.getSingboxRules(mode);
         json['route'] = {
-          'rules': RuleManager.getSingboxRules(mode),
+          'rules': rules,
           'final': 'direct',
         };
       }
@@ -167,52 +185,84 @@ class KernelConfigGenerator {
     }
 
     // 添加传输协议
-    if (nodeConfig.containsKey('network') && nodeConfig['network'] != 'tcp') {
-      final network = nodeConfig['network'] as String;
+    final network = nodeConfig['network'] as String? ?? 'tcp';
+    if (network != 'tcp' && network.isNotEmpty) {
+      final transport = <String, dynamic>{
+        'type': network == 'ws' || network == 'websocket' ? 'ws' : 
+                network == 'h2' || network == 'http' ? 'http' :
+                network == 'grpc' ? 'grpc' : network,
+      };
+      
       switch (network) {
         case 'ws':
-          outbound['transport'] = {
-            'type': 'ws',
-            'path': nodeConfig['ws-path'] ?? '/',
-            'headers': nodeConfig['ws-headers'] ?? {},
-          };
+        case 'websocket':
+          transport['path'] = nodeConfig['ws-path'] ?? nodeConfig['path'] ?? '/';
+          final headers = <String, dynamic>{};
+          if (nodeConfig.containsKey('ws-headers')) {
+            final wsHeaders = nodeConfig['ws-headers'];
+            if (wsHeaders is Map) {
+              headers.addAll(Map<String, dynamic>.from(wsHeaders));
+            }
+          }
+          if (nodeConfig.containsKey('host') && !headers.containsKey('Host')) {
+            headers['Host'] = nodeConfig['host'];
+          }
+          if (headers.isNotEmpty) {
+            transport['headers'] = headers;
+          }
           break;
         case 'h2':
-          outbound['transport'] = {
-            'type': 'http',
-            'host': nodeConfig['h2-opts']?['host'] ?? [],
-            'path': nodeConfig['h2-opts']?['path'] ?? '/',
-          };
+        case 'http':
+          final h2Opts = nodeConfig['h2-opts'] as Map<String, dynamic>?;
+          transport['host'] = h2Opts?['host'] ?? 
+                              (nodeConfig.containsKey('host') ? [nodeConfig['host']] : []);
+          transport['path'] = h2Opts?['path'] ?? nodeConfig['path'] ?? '/';
           break;
         case 'grpc':
-          outbound['transport'] = {
-            'type': 'grpc',
-            'service_name': nodeConfig['grpc-opts']?['grpc-service-name'] ?? '',
-          };
+          final grpcOpts = nodeConfig['grpc-opts'] as Map<String, dynamic>?;
+          transport['service_name'] = grpcOpts?['grpc-service-name'] ?? 
+                                       nodeConfig['path'] ?? '';
           break;
+      }
+      
+      if (transport['type'] != 'tcp') {
+        outbound['transport'] = transport;
       }
     }
 
     // 添加 TLS 配置
-    if (nodeConfig['tls'] == true) {
-      outbound['tls'] = {
+    if (nodeConfig['tls'] == true || nodeConfig['tls'] == 'tls') {
+      final tlsConfig = <String, dynamic>{
         'enabled': true,
-        'server_name': nodeConfig['sni'],
         'insecure': nodeConfig['skip-cert-verify'] ?? false,
       };
       
+      if (nodeConfig.containsKey('sni') && nodeConfig['sni'] != null) {
+        tlsConfig['server_name'] = nodeConfig['sni'];
+      }
+      
       if (nodeConfig.containsKey('alpn')) {
-        outbound['tls']['alpn'] = nodeConfig['alpn'];
+        final alpn = nodeConfig['alpn'];
+        if (alpn is List) {
+          tlsConfig['alpn'] = alpn;
+        } else if (alpn is String) {
+          tlsConfig['alpn'] = [alpn];
+        }
       }
 
       // Reality 配置
       if (nodeConfig.containsKey('reality-opts')) {
-        outbound['tls']['reality'] = {
-          'enabled': true,
-          'public_key': nodeConfig['reality-opts']?['public-key'],
-          'short_id': nodeConfig['reality-opts']?['short-id'],
-        };
+        final realityOpts = nodeConfig['reality-opts'] as Map<String, dynamic>?;
+        if (realityOpts != null) {
+          tlsConfig['reality'] = {
+            'enabled': true,
+            'public_key': realityOpts['public-key'],
+            'short_id': realityOpts['short-id'],
+          };
+        }
       }
+      
+      outbound['tls'] = tlsConfig;
     }
 
     return outbound;
@@ -364,73 +414,124 @@ class KernelConfigGenerator {
     return proxy;
   }
 
-  /// 生成 Sing-box 配置
+  /// 生成 Sing-box 配置（参考 NekoBoxForAndroid）
   static String _generateSingboxConfig(
     Subscription subscription,
     ConnectionMode mode,
-    Node? selectedNode,
-  ) {
+    Node? selectedNode, {
+    bool isVpnMode = true,
+    bool allowAccess = false,
+    int mixedPort = 2080,
+    bool bypassLan = true,
+    List<String>? remoteDns,
+    List<String>? directDns,
+  }) {
+    final inbounds = <Map<String, dynamic>>[];
+    
+    // VPN 模式：添加 TUN inbound（必须，用于创建 VPN 接口）
+    if (isVpnMode) {
+      inbounds.add({
+        'type': 'tun',
+        'tag': 'tun-in',
+        'stack': 'mixed',
+        'endpoint_independent_nat': true,
+        'mtu': 1500,
+        'domain_strategy': 'prefer_ipv4',
+        'sniff': true,
+        'sniff_override_destination': false,
+        'inet4_address': ['172.19.0.1/28'],
+        'auto_route': false,  // 禁用 auto_route，让 VPN Service 管理路由
+        'strict_route': false,
+      });
+    }
+    
+    // 无论 VPN 还是代理模式，都添加 mixed inbound（外部端口）
+    final bind = allowAccess ? '0.0.0.0' : '127.0.0.1';
+    inbounds.add({
+      'type': 'mixed',
+      'tag': 'mixed-in',
+      'listen': bind,
+      'listen_port': mixedPort,
+      'domain_strategy': 'prefer_ipv4',
+      'sniff': true,
+      'sniff_override_destination': false,
+    });
+
     final config = {
       'log': {
         'level': 'info',
         'timestamp': true,
       },
-      'dns': DnsManager.getSingboxDns(),
-      'inbounds': [
-        {
-          'type': 'mixed',
-          'listen': '127.0.0.1',
-          'listen_port': 7890,
-        },
-      ],
-      'outbounds': [
-        {
-          'type': 'direct',
-          'tag': 'direct',
-        },
-        if (selectedNode != null) _nodeToSingboxOutbound(selectedNode),
-      ],
+      'dns': DnsManager.getSingboxDns(
+        remoteDns: remoteDns ?? ['https://dns.google/dns-query'],
+        directDns: directDns ?? ['https://223.5.5.5/dns-query'],
+        enableFakeDns: false, // 暂时禁用 FakeDNS
+        enableDnsRouting: true,
+      ),
+      'inbounds': inbounds,
+      'outbounds': () {
+        final outbounds = <Map<String, dynamic>>[
+          {
+            'type': 'direct',
+            'tag': 'direct',
+          },
+          {
+            'type': 'direct',
+            'tag': 'bypass',
+          },
+          {
+            'type': 'block',
+            'tag': 'block',
+          },
+        ];
+        if (selectedNode != null) {
+          final proxyOutbound = _nodeToSingboxOutbound(selectedNode);
+          // 确保 proxy outbound 的 tag 是 'proxy'（路由规则需要）
+          proxyOutbound['tag'] = 'proxy';
+          outbounds.add(proxyOutbound);
+        }
+        return outbounds;
+      }(),
       'route': {
-        'rules': RuleManager.getSingboxRules(mode),
-        'final': mode == ConnectionMode.global ? 'proxy' : 'direct',
+        'rules': _buildRouteRules(mode),
+        'auto_detect_interface': true,
+        // 规则模式：final 应该是 'proxy'，因为规则中最后一条是 {'outbound': 'proxy'}
+        // 全局模式：final 应该是 'proxy'，所有流量走代理
+        'final': 'proxy',
       },
     };
 
     return jsonEncode(config);
   }
 
+  /// 构建路由规则（参考 NekoBoxForAndroid）
+  static List<Map<String, dynamic>> _buildRouteRules(ConnectionMode mode) {
+    final rules = <Map<String, dynamic>>[];
+    
+    // DNS hijack 规则（必须放在最前面）
+    rules.add({
+      'protocol': ['dns'],
+      'action': 'hijack-dns',
+    });
+    rules.add({
+      'port': [53],
+      'action': 'hijack-dns',
+    });
+    
+    // 添加其他规则
+    rules.addAll(RuleManager.getSingboxRules(mode));
+    
+    return rules;
+  }
+
   /// 节点转换为 Sing-box outbound
   static Map<String, dynamic> _nodeToSingboxOutbound(Node node) {
     try {
       final nodeConfig = jsonDecode(node.config ?? '{}') as Map<String, dynamic>;
-      final type = nodeConfig['type'] as String? ?? 'vmess';
-      
-      final outbound = {
-        'type': type,
-        'tag': 'proxy',
-        'server': nodeConfig['server'],
-        'server_port': nodeConfig['port'],
-      };
-
-      switch (type) {
-        case 'vmess':
-          outbound['uuid'] = nodeConfig['uuid'];
-          outbound['security'] = nodeConfig['cipher'] ?? 'auto';
-          break;
-        case 'vless':
-          outbound['uuid'] = nodeConfig['uuid'];
-          break;
-        case 'trojan':
-          outbound['password'] = nodeConfig['password'];
-          break;
-        case 'shadowsocks':
-          outbound['method'] = nodeConfig['cipher'];
-          outbound['password'] = nodeConfig['password'];
-          break;
-      }
-
-      return outbound;
+      // 使用完整的节点配置转换方法
+      return _nodeConfigToSingboxOutbound(nodeConfig, node.name);
     } catch (e) {
+      // 如果转换失败，返回一个基本的 direct outbound
       return {
         'type': 'direct',
         'tag': 'proxy',

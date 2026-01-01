@@ -2,58 +2,60 @@ import '../models/connection_mode.dart';
 
 /// DNS 管理器
 class DnsManager {
-  /// 获取 DNS 配置（Sing-box 格式）
+  /// 获取 DNS 配置（Sing-box 格式，参考 NekoBoxForAndroid）
   static Map<String, dynamic> getSingboxDns({
-    List<String>? servers,
-    bool enableDoH = false,
-    bool enableDoT = false,
+    List<String>? remoteDns,
+    List<String>? directDns,
+    bool enableFakeDns = false,
+    bool enableDnsRouting = true,
   }) {
     final dnsServers = <Map<String, dynamic>>[];
 
-    // 添加普通 DNS 服务器
-    if (servers != null && servers.isNotEmpty) {
-      for (final server in servers) {
-        dnsServers.add({
-          'address': server,
-          'address_resolver': 'local',
-        });
-      }
-    } else {
-      // 默认 DNS 服务器
-      dnsServers.addAll([
-        {'address': '223.5.5.5', 'address_resolver': 'local'},  // 阿里 DNS
-        {'address': '119.29.29.29', 'address_resolver': 'local'},  // 腾讯 DNS
-        {'address': '8.8.8.8', 'address_resolver': 'local'},  // Google DNS
-      ]);
-    }
+    // 1. DNS block（用于阻止 DNS 查询）
+    dnsServers.add({
+      'tag': 'dns-block',
+      'address': 'rcode://success',
+    });
 
-    // 添加 DoH 服务器
-    if (enableDoH) {
-      dnsServers.addAll([
-        {
-          'address': 'https://doh.pub/dns-query',
-          'address_resolver': 'local',
-        },
-        {
-          'address': 'https://dns.alidns.com/dns-query',
-          'address_resolver': 'local',
-        },
-      ]);
-    }
+    // 2. DNS local（本地 DNS 解析器，必须）
+    dnsServers.add({
+      'tag': 'dns-local',
+      'address': 'local',
+      'detour': 'direct',
+    });
 
-    // 添加 DoT 服务器
-    if (enableDoT) {
-      dnsServers.addAll([
-        {
-          'address': 'tls://dns.alidns.com',
-          'address_resolver': 'local',
-        },
-      ]);
+    // 3. DNS direct（直连 DNS，用于解析代理服务器地址）
+    final directDnsList = directDns ?? ['https://223.5.5.5/dns-query'];
+    dnsServers.add({
+      'tag': 'dns-direct',
+      'address': directDnsList.first,
+      'detour': 'direct',
+      'address_resolver': 'dns-local',
+      'strategy': 'prefer_ipv4',
+    });
+
+    // 4. DNS remote（远程 DNS，通过代理解析）
+    final remoteDnsList = remoteDns ?? ['https://dns.google/dns-query'];
+    dnsServers.add({
+      'tag': 'dns-remote',
+      'address': remoteDnsList.first,
+      'address_resolver': 'dns-direct',
+      'strategy': 'prefer_ipv4',
+    });
+
+    // 5. DNS fake（FakeDNS，用于流量嗅探）
+    if (enableFakeDns) {
+      dnsServers.add({
+        'tag': 'dns-fake',
+        'address': 'fakedns',
+      });
     }
 
     return {
       'servers': dnsServers,
-      'rules': _getDnsRules(),
+      'final': 'dns-remote',  // 默认使用远程 DNS
+      'rules': enableDnsRouting ? _getDnsRules() : [],
+      'independent_cache': true,
     };
   }
 
@@ -91,17 +93,17 @@ class DnsManager {
     return dns;
   }
 
-  /// 获取 DNS 规则
+  /// 获取 DNS 规则（参考 NekoBoxForAndroid）
   static List<Map<String, dynamic>> _getDnsRules() {
     return [
-      // 中国域名使用国内 DNS
+      // 中国域名使用直连 DNS
       {
         'domain_suffix': ['.cn'],
-        'server': '223.5.5.5',
+        'server': 'dns-direct',
       },
-      // 其他使用默认 DNS
+      // 其他域名使用远程 DNS（通过代理）
       {
-        'server': '8.8.8.8',
+        'server': 'dns-remote',
       },
     ];
   }

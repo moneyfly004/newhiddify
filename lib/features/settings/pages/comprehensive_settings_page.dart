@@ -64,16 +64,17 @@ class _ComprehensiveSettingsPageState extends State<ComprehensiveSettingsPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('设置'),
-        automaticallyImplyLeading: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () => _settingsService.resetToDefaults(),
-            tooltip: '重置为默认值',
-          ),
-        ],
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            Navigator.of(context).pop();
+          },
+        ),
       ),
-      body: ListView(
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           // 通用设置
@@ -504,6 +505,36 @@ class _ComprehensiveSettingsPageState extends State<ComprehensiveSettingsPage> {
                 subtitle: Text('1.0.0'),
               ),
             ],
+          ),
+        ],
+      ),
+          ),
+          // 重置按钮放在底部
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).scaffoldBackgroundColor,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 4,
+                  offset: const Offset(0, -2),
+                ),
+              ],
+            ),
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.refresh),
+                label: const Text('重置为默认值'),
+                onPressed: () {
+                  _settingsService.resetToDefaults();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('已重置为默认值')),
+                  );
+                },
+              ),
+            ),
           ),
         ],
       ),

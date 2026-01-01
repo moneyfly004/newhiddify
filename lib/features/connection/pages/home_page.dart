@@ -21,6 +21,10 @@ import '../../../core/utils/error_handler.dart';
 import '../../../ui/widgets/loading_overlay.dart';
 import '../../../ui/widgets/network_status_indicator.dart';
 import '../../../ui/theme/cyberpunk_theme.dart';
+import '../../../core/services/traffic_monitor.dart';
+import '../../../core/di/injection.dart';
+import '../../../core/models/app_settings.dart';
+import '../../../core/services/settings_service.dart';
 
 /// 主页
 class HomePage extends StatefulWidget {
@@ -32,9 +36,13 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final _connectionManager = getIt<ConnectionManager>();
+  final _trafficMonitor = getIt<TrafficMonitor>();
+  final _settingsService = SettingsService.instance;
   ConnectionMode _currentMode = ConnectionMode.rules;
+  ServiceMode _serviceMode = ServiceMode.vpn;
   SubscriptionCubit? _subscriptionCubit;
   NodeCubit? _nodeCubit;
+  bool _isNodeListExpanded = false;
 
   @override
   void initState() {
@@ -291,43 +299,67 @@ class _HomePageState extends State<HomePage> {
                     
                     const SizedBox(height: 16),
                     
-                  // 模式选择器
-                  ModeSelector(
-                    currentMode: _currentMode,
-                    onModeChanged: (mode) async {
-                      setState(() {
-                        _currentMode = mode;
-                      });
-                      // 如果已连接，应用新模式
-                      if (connectionStatus.isConnected) {
-                        try {
-                          await _connectionManager.switchMode(mode);
-                        } catch (e) {
-                          if (mounted) {
-                            ErrorHandler.showError(context, '切换模式失败: $e');
-                          }
-                        }
-                      }
-                    },
-                  ),
+                    // 流量统计显示
+                    if (connectionStatus.isConnected)
+                      _buildTrafficStats(context),
                     
                     const SizedBox(height: 16),
                     
-                    // 服务器列表
+                    // 路由模式选择器（规则/全局）- 参考 NekoBoxForAndroid
+                    Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '路由模式',
+                              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                            ),
+                            const SizedBox(height: 12),
+                            ModeSelector(
+                              currentMode: _currentMode,
+                              onModeChanged: (mode) async {
+                                setState(() {
+                                  _currentMode = mode;
+                                });
+                                // 如果已连接，应用新模式
+                                if (connectionStatus.isConnected) {
+                                  try {
+                                    await _connectionManager.switchMode(mode);
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text('已切换到${mode.displayName}模式'),
+                                          duration: const Duration(seconds: 1),
+                                        ),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (mounted) {
+                                      ErrorHandler.showError(context, '切换模式失败: $e');
+                                    }
+                                  }
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    // 服务器列表（可折叠）
                     BlocBuilder<NodeCubit, NodeState>(
                       builder: (context, nodeState) {
                         if (nodeState is NodeLoaded) {
-                          return ServerListWidget(
-                            nodes: nodeState.nodes,
-                            selectedNode: nodeState.selectedNode,
-                            isAutoSelect: nodeState.isAutoSelect,
-                            isTesting: nodeState.isTesting,
-                            onNodeSelected: (node) {
-                              context.read<NodeCubit>().selectNode(node);
-                            },
-                            onAutoSelect: () {
-                              context.read<NodeCubit>().enableAutoSelect();
-                            },
+                          return _buildCollapsibleNodeList(
+                            context,
+                            nodeState,
                           );
                         }
                         return LoadingOverlay(
@@ -504,5 +536,378 @@ class _HomePageState extends State<HomePage> {
         }
       }
     }
+  }
+
+  Widget _buildServiceModeSelector(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  '服务模式',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: '服务模式决定如何连接：VPN 模式通过系统 VPN 接口，代理模式通过本地代理端口',
+                  child: Icon(Icons.help_outline, size: 16, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '决定如何建立连接（VPN 接口 vs 代理端口）',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Colors.grey[600],
+                  ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildModeOption(
+                    context,
+                    'VPN 模式',
+                    '系统级 VPN\n所有应用自动走代理',
+                    ServiceMode.vpn,
+                    Icons.vpn_key,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _buildModeOption(
+                    context,
+                    '代理模式',
+                    '本地代理端口\n需应用手动配置',
+                    ServiceMode.proxy,
+                    Icons.settings_ethernet,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeOption(
+    BuildContext context,
+    String title,
+    String subtitle,
+    ServiceMode mode,
+    IconData icon,
+  ) {
+    final isSelected = _serviceMode == mode;
+    return InkWell(
+      onTap: () async {
+        setState(() {
+          _serviceMode = mode;
+        });
+        await _settingsService.update('serviceMode', mode);
+        // 如果已连接，需要重新连接以应用新模式
+        final currentStatus = await _connectionManager.statusStream.first;
+        if (currentStatus.isConnected) {
+          // 提示用户需要重新连接
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('服务模式已切换，请重新连接以应用新设置'),
+                action: SnackBarAction(
+                  label: '断开',
+                  onPressed: () => _connectionManager.disconnect(),
+                ),
+              ),
+            );
+          }
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: isSelected
+                ? CyberpunkTheme.neonCyan
+                : Colors.grey.withOpacity(0.3),
+            width: isSelected ? 2 : 1,
+          ),
+          borderRadius: BorderRadius.circular(8),
+          color: isSelected
+              ? CyberpunkTheme.neonCyan.withOpacity(0.1)
+              : Colors.transparent,
+        ),
+        child: Column(
+          children: [
+            Icon(
+              icon,
+              color: isSelected
+                  ? CyberpunkTheme.neonCyan
+                  : Colors.grey,
+              size: 32,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              title,
+              style: TextStyle(
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                color: isSelected
+                    ? CyberpunkTheme.neonCyan
+                    : Colors.grey[700],
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              style: TextStyle(
+                fontSize: 10,
+                color: Colors.grey[600],
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTrafficStats(BuildContext context) {
+    return StreamBuilder<TrafficStats>(
+      stream: _trafficMonitor.trafficStream,
+      initialData: TrafficStats.zero(),
+      builder: (context, snapshot) {
+        final stats = snapshot.data ?? TrafficStats.zero();
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '流量统计',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildTrafficItem(
+                        context,
+                        '上传',
+                        stats.formattedUpload,
+                        Icons.upload,
+                        Colors.blue,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: _buildTrafficItem(
+                        context,
+                        '下载',
+                        stats.formattedDownload,
+                        Icons.download,
+                        Colors.green,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: _buildTrafficItem(
+                        context,
+                        '总计',
+                        stats.formattedTotal,
+                        Icons.data_usage,
+                        CyberpunkTheme.neonCyan,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTrafficItem(
+    BuildContext context,
+    String label,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
+    return Column(
+      children: [
+        Icon(icon, color: color, size: 24),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: Colors.grey[600],
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCollapsibleNodeList(
+    BuildContext context,
+    NodeLoaded nodeState,
+  ) {
+    return Card(
+      margin: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          ListTile(
+            title: const Text('服务器列表'),
+            subtitle: nodeState.isAutoSelect && nodeState.selectedNode != null
+                ? Text('自动选择: ${nodeState.selectedNode!.name}')
+                : nodeState.selectedNode != null
+                    ? Text('已选择: ${nodeState.selectedNode!.name}')
+                    : const Text('未选择'),
+            trailing: Icon(
+              _isNodeListExpanded
+                  ? Icons.expand_less
+                  : Icons.expand_more,
+            ),
+            onTap: () {
+              setState(() {
+                _isNodeListExpanded = !_isNodeListExpanded;
+              });
+            },
+          ),
+          if (_isNodeListExpanded) ...[
+            const Divider(height: 1),
+            // 自动选择选项
+            ListTile(
+              leading: Icon(
+                Icons.auto_awesome,
+                color: nodeState.isAutoSelect
+                    ? Theme.of(context).colorScheme.primary
+                    : Colors.grey,
+              ),
+              title: const Text('自动选择'),
+              subtitle: nodeState.isAutoSelect && nodeState.selectedNode != null
+                  ? Text('当前: ${nodeState.selectedNode!.name}')
+                  : null,
+              trailing: nodeState.isAutoSelect
+                  ? Icon(
+                      Icons.check_circle,
+                      color: Theme.of(context).colorScheme.primary,
+                    )
+                  : null,
+              selected: nodeState.isAutoSelect,
+              onTap: () {
+                context.read<NodeCubit>().enableAutoSelect();
+              },
+            ),
+            const Divider(height: 1),
+            // 服务器列表
+            ...nodeState.nodes.map((node) => _buildNodeItem(context, node, nodeState)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNodeItem(BuildContext context, Node node, NodeLoaded nodeState) {
+    final isSelected = !nodeState.isAutoSelect && nodeState.selectedNode?.id == node.id;
+    final isOnline = node.isOnline;
+
+    return ListTile(
+      leading: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: isOnline
+              ? Colors.green.withOpacity(0.1)
+              : Colors.grey.withOpacity(0.1),
+        ),
+        child: Icon(
+          isOnline ? Icons.cloud_done : Icons.cloud_off,
+          color: isOnline ? Colors.green : Colors.grey,
+        ),
+      ),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              node.name,
+              style: TextStyle(
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ),
+          if (node.region != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.blue.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                node.region!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.blue[700],
+                ),
+              ),
+            ),
+        ],
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              if (node.latency != null) ...[
+                Icon(Icons.speed, size: 14, color: Colors.grey[600]),
+                const SizedBox(width: 4),
+                Text(
+                  node.latencyText,
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+                const SizedBox(width: 16),
+              ],
+              if (node.downloadSpeed != null) ...[
+                Icon(Icons.download, size: 14, color: Colors.grey[600]),
+                const SizedBox(width: 4),
+                Text(
+                  node.speedText,
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+      trailing: isSelected
+          ? Icon(
+              Icons.check_circle,
+              color: Theme.of(context).colorScheme.primary,
+            )
+          : null,
+      selected: isSelected,
+      onTap: () {
+        context.read<NodeCubit>().selectNode(node);
+      },
+    );
   }
 }
